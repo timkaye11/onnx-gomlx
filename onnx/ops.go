@@ -292,7 +292,9 @@ func convertGather(node *protos.NodeProto, inputs []*Node) *Node {
 	if gatherAxis >= inputs[0].Rank() || gatherAxis < 0 {
 		exceptions.Panicf("Gather(data, indices, axis=%d), axis within d.Rank()=%d range", axis, inputs[0].Rank())
 	}
-	return onnxGather(inputs[0], inputs[1], gatherAxis)
+	// ONNX uses Python-style negative indexing, normalize to positive indices
+	normalizedIndices := NormalizeIndices(inputs[0], inputs[1], gatherAxis)
+	return onnxGather(inputs[0], normalizedIndices, gatherAxis)
 }
 
 func onnxGather(data, indices *Node, gatherAxis int) *Node {
@@ -352,8 +354,10 @@ func convertGatherElements(node *protos.NodeProto, inputs []*Node) *Node {
 	if inputs[0].Rank() != inputs[1].Rank() {
 		exceptions.Panicf("Gather(data=%s, indices=%s, axis=%d): data and indices must have the same rank", inputs[0].Shape(), inputs[1].Shape(), axis)
 	}
+	// ONNX uses Python-style negative indexing, normalize to positive indices
+	normalizedIndices := NormalizeIndices(inputs[0], inputs[1], gatherAxis)
 	var output *Node
-	err := exceptions.TryCatch[error](func() { output = onnxGatherElements(inputs[0], inputs[1], gatherAxis) })
+	err := exceptions.TryCatch[error](func() { output = onnxGatherElements(inputs[0], normalizedIndices, gatherAxis) })
 	if err != nil {
 		panic(errors.WithMessagef(err, "converting node %s", node))
 	}

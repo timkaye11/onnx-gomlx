@@ -21,6 +21,10 @@ require (
 	k8s.io/klog/v2 v2.130.1
 )
 
+// Temporary: use local gomlx with NormalizeIndices function
+// TODO: Remove this replace directive once gomlx PR is merged
+replace github.com/gomlx/gomlx => ../gomlx
+
 require (
 	github.com/andybalholm/brotli v1.1.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
@@ -30,7 +34,6 @@ require (
 	github.com/gomlx/stablehlo v0.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
-	github.com/kr/pretty v0.3.1 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/olekukonko/tablewriter v0.0.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect

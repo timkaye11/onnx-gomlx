@@ -79,9 +79,83 @@ func onnxBroadcastToCommonShape(operands []*Node) []*Node {
 //
 // It differs from GoMLX and XLA in that it automatically prepend 1-dimensional axes to
 // any of the operands, if they differ in rank.
+// It also handles dtype mismatches by promoting to the higher precision type.
 func convertBinaryOp(fn gomlxBinaryOp, lhs, rhs *Node) *Node {
 	operands := onnxImplicitExpansion([]*Node{lhs, rhs})
-	return fn(operands[0], operands[1])
+	lhs, rhs = operands[0], operands[1]
+
+	// Handle dtype mismatches by promoting to the higher precision type
+	if lhs.DType() != rhs.DType() {
+		lhs, rhs = promoteToCommonDType(lhs, rhs)
+	}
+
+	return fn(lhs, rhs)
+}
+
+// promoteToCommonDType converts two nodes to a common dtype based on type promotion rules.
+// Float64 > Float32 > Float16/BFloat16 > Int64 > Int32 > Int16 > Int8 > Uint64 > ...
+func promoteToCommonDType(lhs, rhs *Node) (*Node, *Node) {
+	lhsDType := lhs.DType()
+	rhsDType := rhs.DType()
+
+	// If one is float and the other is also float, promote to higher precision float
+	// If one is float and other is int, promote to float
+	// Otherwise, use the type with larger size
+
+	targetDType := lhsDType
+	if dtypePriority(rhsDType) > dtypePriority(lhsDType) {
+		targetDType = rhsDType
+	}
+
+	if lhsDType != targetDType {
+		lhs = ConvertDType(lhs, targetDType)
+	}
+	if rhsDType != targetDType {
+		rhs = ConvertDType(rhs, targetDType)
+	}
+	return lhs, rhs
+}
+
+// dtypePriority returns a priority value for dtype promotion.
+// Higher values are preferred in mixed-type operations.
+func dtypePriority(dt dtypes.DType) int {
+	switch dt {
+	case dtypes.Float64:
+		return 100
+	case dtypes.Float32:
+		return 90
+	case dtypes.Float16, dtypes.BFloat16:
+		return 80
+	case dtypes.Int64:
+		return 70
+	case dtypes.Int32:
+		return 60
+	case dtypes.Int16:
+		return 50
+	case dtypes.Int8:
+		return 40
+	case dtypes.Uint64:
+		return 35
+	case dtypes.Uint32:
+		return 30
+	case dtypes.Uint16:
+		return 25
+	case dtypes.Uint8:
+		return 20
+	case dtypes.Bool:
+		return 10
+	default:
+		return 0
+	}
+}
+
+// convertMatMul handles dtype promotion before matrix multiplication.
+// ONNX allows mixed dtypes in MatMul and promotes to the higher precision type.
+func convertMatMul(lhs, rhs *Node) *Node {
+	if lhs.DType() != rhs.DType() {
+		lhs, rhs = promoteToCommonDType(lhs, rhs)
+	}
+	return MatMul(lhs, rhs)
 }
 
 // convertClip converts a ONNX node to a GoMLX node.
@@ -420,6 +494,10 @@ func convertShape(node *protos.NodeProto, inputs []*Node) *Node {
 // https://onnx.ai/onnx/operators/onnx__Flatten.html
 func convertFlatten(node *protos.NodeProto, inputs []*Node) *Node {
 	operand := inputs[0]
+	// Handle scalar input: ONNX Flatten produces [1, 1] for scalars
+	if operand.Rank() == 0 {
+		return Reshape(operand, 1, 1)
+	}
 	splitAxis := getIntAttrOr(node, "axis", 1)
 	splitAxis = AdjustAxisToOperandRank(operand, splitAxis)
 	return onnxFlatten(operand, splitAxis)
@@ -503,6 +581,11 @@ func convertTranspose(node *protos.NodeProto, inputs []*Node) *Node {
 func convertGemm(node *protos.NodeProto, inputs []*Node) *Node {
 	operandA := inputs[0]
 	operandB := inputs[1]
+
+	// Handle dtype mismatches by promoting to common type
+	if operandA.DType() != operandB.DType() {
+		operandA, operandB = promoteToCommonDType(operandA, operandB)
+	}
 
 	transposeA := getBoolAttrOr(node, "transA", false)
 	transposeB := getBoolAttrOr(node, "transB", false)
@@ -1089,6 +1172,13 @@ func convertCumSum(m *Model, convertedOutputs map[string]*Node, node *protos.Nod
 // onnxCumSum adds "exclusive" and "reverse" options to the normal CumSum.
 // TODO: reimplement exclusive/reverse by changing original CumSum implementation: it will be much more efficient.
 func onnxCumSum(operand *Node, axis int, exclusive, reverse bool) *Node {
+	// Handle scalar input: CumSum of a scalar is identity (or zero if exclusive)
+	if operand.Rank() == 0 {
+		if exclusive {
+			return Scalar(operand.Graph(), operand.DType(), 0)
+		}
+		return Identity(operand)
+	}
 	adjustedAxis := AdjustAxisToOperandRank(operand, axis)
 	if reverse {
 		operand = Reverse(operand, adjustedAxis)
@@ -1640,6 +1730,14 @@ func convertLayerNormalization(m *Model, convertedOutputs map[string]*Node, node
 		axes[i] = axis + i
 	}
 
+	// Convert scale and bias to match input dtype if needed (handle mixed FP16/FP32 models)
+	if scale.DType() != x.DType() {
+		scale = ConvertDType(scale, x.DType())
+	}
+	if bias != nil && bias.DType() != x.DType() {
+		bias = ConvertDType(bias, x.DType())
+	}
+
 	// Reshape scale and bias to match input rank for broadcasting
 	// Scale/bias have shape matching the normalized dimensions
 	// Need to add leading 1s to match the input rank
@@ -1854,7 +1952,11 @@ func convertQuantizeLinear(nodeProto *protos.NodeProto, inputs []*Node) *Node {
 // Formula: y = saturate((x / y_scale) + y_zero_point)
 func onnxQuantizeLinear(x, yScale, yZeroPoint *Node, targetAxis int, outputDType dtypes.DType) *Node {
 	g := x.Graph()
-	targetAxis = AdjustAxisToOperandRank(x, targetAxis)
+
+	// Handle scalar input: axis doesn't matter for scalars
+	if x.Rank() > 0 {
+		targetAxis = AdjustAxisToOperandRank(x, targetAxis)
+	}
 
 	// Reshape scale to match input rank if it's 1-D
 	if !yScale.IsScalar() {

@@ -93,14 +93,25 @@ func convertBinaryOp(fn gomlxBinaryOp, lhs, rhs *Node) *Node {
 }
 
 // promoteToCommonDType converts two nodes to a common dtype based on type promotion rules.
-// Float64 > Float32 > Float16/BFloat16 > Int64 > Int32 > Int16 > Int8 > Uint64 > ...
+// When one operand is Float16 and the other is Float32, we prefer Float16 to keep
+// operations in FP16 with NEON-accelerated kernels.
+// For other mixed types, higher precision is preferred: Float64 > Float32 > Float16/BFloat16 > Int64 > ...
 func promoteToCommonDType(lhs, rhs *Node) (*Node, *Node) {
 	lhsDType := lhs.DType()
 	rhsDType := rhs.DType()
 
-	// If one is float and the other is also float, promote to higher precision float
-	// If one is float and other is int, promote to float
-	// Otherwise, use the type with larger size
+	// Special case: prefer FP16 over Float32 to leverage NEON-accelerated FP16 kernels
+	if (lhsDType == dtypes.Float16 && rhsDType == dtypes.Float32) ||
+		(lhsDType == dtypes.Float32 && rhsDType == dtypes.Float16) {
+		targetDType := dtypes.Float16
+		if lhsDType != targetDType {
+			lhs = ConvertDType(lhs, targetDType)
+		}
+		if rhsDType != targetDType {
+			rhs = ConvertDType(rhs, targetDType)
+		}
+		return lhs, rhs
+	}
 
 	targetDType := lhsDType
 	if dtypePriority(rhsDType) > dtypePriority(lhsDType) {
@@ -195,8 +206,14 @@ func onnxWhere(inputs []*Node) *Node {
 	// Broadcast according to ONNX rules.
 	inputs = onnxBroadcastToCommonShape(inputs)
 
-	// Now we can use GoMLX Where:
 	cond, onTrue, onFalse := inputs[0], inputs[1], inputs[2]
+
+	// Handle dtype mismatches between onTrue and onFalse.
+	// GoMLX Where requires both branches to have the same dtype.
+	if onTrue.DType() != onFalse.DType() {
+		onTrue, onFalse = promoteToCommonDType(onTrue, onFalse)
+	}
+
 	return Where(cond, onTrue, onFalse)
 }
 

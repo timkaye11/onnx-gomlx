@@ -964,6 +964,78 @@ func convertReduceMean(m *Model, convertedOutputs map[string]*Node, node *protos
 	}
 }
 
+// convertReduceMax converts a ONNX node to a GoMLX node.
+//
+// See ONNX documentation in:
+// https://onnx.ai/onnx/operators/onnx__ReduceMax.html
+func convertReduceMax(m *Model, convertedOutputs map[string]*Node, node *protos.NodeProto, inputs []*Node) *Node {
+	return convertReduceGeneric(m, convertedOutputs, node, inputs, ReduceMax, ReduceAllMax, "ReduceMax")
+}
+
+// convertReduceMin converts a ONNX node to a GoMLX node.
+//
+// See ONNX documentation in:
+// https://onnx.ai/onnx/operators/onnx__ReduceMin.html
+func convertReduceMin(m *Model, convertedOutputs map[string]*Node, node *protos.NodeProto, inputs []*Node) *Node {
+	return convertReduceGeneric(m, convertedOutputs, node, inputs, ReduceMin, ReduceAllMin, "ReduceMin")
+}
+
+// convertReduceSum converts a ONNX node to a GoMLX node.
+//
+// See ONNX documentation in:
+// https://onnx.ai/onnx/operators/onnx__ReduceSum.html
+func convertReduceSum(m *Model, convertedOutputs map[string]*Node, node *protos.NodeProto, inputs []*Node) *Node {
+	return convertReduceGeneric(m, convertedOutputs, node, inputs, ReduceSum, ReduceAllSum, "ReduceSum")
+}
+
+// convertReduceGeneric is a helper function for converting Reduce* ONNX ops.
+func convertReduceGeneric(m *Model, convertedOutputs map[string]*Node, node *protos.NodeProto, inputs []*Node,
+	reduceFunc func(*Node, ...int) *Node, reduceAllFunc func(*Node) *Node, opName string) *Node {
+	operand := inputs[0]
+	keepDims := getIntAttrOr(node, "keepdims", 1) > 0
+	noOpIfEmpty := getIntAttrOr(node, "noop_with_empty_axes", 0) > 0
+
+	var axes []int
+	if len(inputs) > 1 {
+		if !inputs[1].DType().IsInt() {
+			exceptions.Panicf("axes must be integer, got %s for node %s", inputs[1].DType(), nodeToString(node))
+		}
+
+		axesT, err := m.materializeConstantExpression(node.Input[1], convertedOutputs)
+		if err != nil {
+			panic(errors.WithMessagef(err, "while converting 'axes' for node %s", nodeToString(node)))
+		}
+		axes = tensorToInts(axesT)
+	}
+
+	axesFromAttr := getIntsAttrOr(node, "axes", nil)
+	if len(axesFromAttr) > 0 {
+		if len(axes) > 0 {
+			exceptions.Panicf("%s(operand, [axes]): axes and axes attribute cannot be used together for node %s", opName, nodeToString(node))
+		}
+		axes = axesFromAttr
+	}
+
+	// If there are no axes to reduce, this is a no-op.
+	if len(axes) == 0 {
+		if noOpIfEmpty {
+			return Identity(operand)
+		} else {
+			res := reduceAllFunc(operand)
+			if keepDims {
+				res = ExpandLeftToRank(res, operand.Rank())
+			}
+			return res
+		}
+	}
+
+	if !keepDims {
+		return reduceFunc(operand, axes...)
+	} else {
+		return ReduceAndKeep(operand, reduceFunc, axes...)
+	}
+}
+
 // convertConstantOfShape converts a ONNX node to a GoMLX node.
 //
 // See ONNX documentation in:

@@ -444,7 +444,7 @@ func (m *Model) convertNode(_ *context.Context, g *Graph, node *protos.NodeProto
 
 	// Ops with equivalents:
 	case "MatMul":
-		result = MatMul(inputs[0], inputs[1])
+		result = convertMatMul(inputs[0], inputs[1])
 
 	// Ops with special behavior:
 	case "Clip":
@@ -498,6 +498,12 @@ func (m *Model) convertNode(_ *context.Context, g *Graph, node *protos.NodeProto
 		result = convertReshape(m, convertedOutputs, node, inputs)
 	case "ReduceMean":
 		result = convertReduceMean(m, convertedOutputs, node, inputs)
+	case "ReduceMax":
+		result = convertReduceMax(m, convertedOutputs, node, inputs)
+	case "ReduceMin":
+		result = convertReduceMin(m, convertedOutputs, node, inputs)
+	case "ReduceSum":
+		result = convertReduceSum(m, convertedOutputs, node, inputs)
 	case "ConstantOfShape":
 		result = convertConstantOfShape(m, convertedOutputs, node, inputs)
 	case "Expand":

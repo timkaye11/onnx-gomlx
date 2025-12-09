@@ -41,3 +41,5 @@ require (
 	golang.org/x/sys v0.38.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/gomlx/gomlx => github.com/timkaye11/gomlx v0.0.0-20251209200749-07bbcf5078d7

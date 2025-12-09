@@ -4,14 +4,17 @@ import (
 	"github.com/gomlx/exceptions"
 	"github.com/gomlx/gomlx/backends"
 	"github.com/gomlx/gomlx/backends/simplego"
-	_ "github.com/gomlx/gomlx/backends/simplego"
-	"github.com/gomlx/gomlx/pkg/core/graph"
+	. "github.com/gomlx/gomlx/pkg/core/graph"
 	"github.com/gomlx/gomlx/pkg/core/shapes"
 	"github.com/gomlx/gomlx/pkg/core/tensors"
 	"github.com/gomlx/gopjrt/dtypes"
 	"github.com/gomlx/onnx-gomlx/internal/protos"
 	"github.com/pkg/errors"
 )
+
+// DefaultDeviceNum is the device number used in local graph operations
+// (like converting tensors for different types).
+var DefaultDeviceNum = backends.DeviceNum(0)
 
 // Shape converts an ONNX data type and shape to GoMLX shapes.Shape (it includes the dtype).
 func Shape(proto *protos.TensorProto) (shape shapes.Shape, err error) {
@@ -65,7 +68,7 @@ func checkAndCreateTensorFromProto[T interface {
 			proto.Name, shape, shape.Size(), len(onnxData))
 	}
 
-	onnxDataTensor := tensors.FromFlatDataAndDimensions[T](onnxData, shape.Dimensions...)
+	onnxDataTensor := tensors.FromFlatDataAndDimensions(onnxData, shape.Dimensions...)
 	if shape.DType == dtypes.FromGenericsType[T]() {
 		// The provided ONNX tensor is exactly what we want:
 		return onnxDataTensor, nil
@@ -76,8 +79,8 @@ func checkAndCreateTensorFromProto[T interface {
 	// It uses GoMLX SimpleGo backend.
 	var converted *tensors.Tensor
 	err := exceptions.TryCatch[error](func() {
-		converted = graph.MustExecOnce(backend, func(x *graph.Node) *graph.Node {
-			return graph.ConvertDType(x, shape.DType)
+		converted = MustExecOnce(backend, func(x *Node) *Node {
+			return ConvertDType(x, shape.DType)
 		}, onnxDataTensor)
 		converted.ToLocal() // Detach from the conversion backend.
 	})
@@ -86,6 +89,10 @@ func checkAndCreateTensorFromProto[T interface {
 
 // tensorToGoMLX converts a protos.TensorProto object to a tensors.Tensor object, handling errors and different data types.
 func tensorToGoMLX(backend backends.Backend, proto *protos.TensorProto) (t *tensors.Tensor, err error) {
+	if proto == nil {
+		return nil, errors.New("ONNX TensorProto is nil")
+	}
+
 	var shape shapes.Shape
 	shape, err = Shape(proto)
 	if err != nil {
@@ -149,28 +156,49 @@ func checkAndCopyTensorToProto[T interface {
 	}
 
 	// If the dtype of the tensor doesn't match the dtype of the proto storing it:
+	var converted *tensors.Tensor
 	if shape.DType != dtypes.FromGenericsType[T]() {
 		// Convert from GoMLX tensor to the ONNX proto data type.
 		// It uses GoMLX SimpleGo backend.
-		var converted *tensors.Tensor
 		backend, err := simplego.New("")
 		if err != nil {
 			return err
 		}
 		defer backend.Finalize()
-		err = exceptions.TryCatch[error](func() {
-			converted = graph.MustExecOnce(backend, func(x *graph.Node) *graph.Node {
-				return graph.ConvertDType(x, shape.DType)
-			}, t.OnDeviceClone(backend))
-			converted.ToLocal() // Detach from the temporarily created backend.
-		})
+		cloned, err := t.OnDeviceClone(backend, DefaultDeviceNum)
+		if err != nil {
+			return err
+		}
+		converted, err = ExecOnce(backend, func(x *Node) *Node {
+			return ConvertDType(x, dtypes.FromGenericsType[T]())
+		}, cloned)
+		if err != nil {
+			return err
+		}
+		err = converted.ToLocal() // Detach from the temporarily created backend.
+		if err != nil {
+			return err
+		}
 		t = converted
+		defer func() {
+			// Notice this only gets used if there was another error, so we ignore this one, if one
+			// happens here.
+			_ = converted.FinalizeAll()
+		}()
 	}
 
 	// Copy GoMLX value (potentially converted) to the ONNX proto.
-	tensors.ConstFlatData(t, func(tensorData []T) {
+	err := tensors.ConstFlatData(t, func(tensorData []T) {
 		copy(onnxData, tensorData) // Copy data to ONNX proto.
 	})
+	if err != nil {
+		return err
+	}
+	if converted != nil {
+		// Return the error of the FinalizeAll -- it will be called again by the deferred fucntion again,
+		// but it is fine.
+		return converted.FinalizeAll()
+	}
 	return nil
 }
 

@@ -42,4 +42,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/gomlx/gomlx => ../gomlx
+replace github.com/gomlx/gomlx => github.com/timkaye11/gomlx v0.0.0-20251209200749-07bbcf5078d7

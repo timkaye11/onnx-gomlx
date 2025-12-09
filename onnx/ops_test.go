@@ -1059,3 +1059,372 @@ func TestIf(t *testing.T) {
 		[]float32{101.0, 202.0},
 	}, -1)
 }
+
+////////////////////////////////////////////////////////////////////
+//
+// Tests for dtype promotion
+//
+////////////////////////////////////////////////////////////////////
+
+func TestPromoteToCommonDType(t *testing.T) {
+	// Test Float16 + Float32 -> Float16 (special optimization case)
+	graphtest.RunTestGraphFn(t, "PromoteDType-Float16-Float32", func(g *Graph) (inputs, outputs []*Node) {
+		lhs := Const(g, []float32{1.0, 2.0, 3.0})
+		lhs = ConvertDType(lhs, dtypes.Float16)
+		rhs := Const(g, []float32{4.0, 5.0, 6.0})
+		inputs = []*Node{lhs, rhs}
+
+		// Use convertBinaryOp which calls promoteToCommonDType internally
+		result := convertBinaryOp(Add, lhs, rhs)
+		// Verify the result dtype is Float16 (not Float32)
+		// Convert back to Float32 for comparison since test framework can't compare Float16 directly
+		outputs = []*Node{
+			ConvertDType(result, dtypes.Float32),
+			Const(g, int64(result.DType())),
+		}
+		return
+	}, []any{
+		// Expected sum: 5, 7, 9 (computed in Float16, converted to Float32 for comparison)
+		[]float32{5.0, 7.0, 9.0},
+		int64(dtypes.Float16),
+	}, 1e-2)
+
+	// Test Float32 + Float64 -> Float64 (standard promotion)
+	graphtest.RunTestGraphFn(t, "PromoteDType-Float32-Float64", func(g *Graph) (inputs, outputs []*Node) {
+		lhs := Const(g, []float32{1.0, 2.0, 3.0})
+		rhs := Const(g, []float64{4.0, 5.0, 6.0})
+		inputs = []*Node{lhs, rhs}
+
+		result := convertBinaryOp(Add, lhs, rhs)
+		outputs = []*Node{
+			result,
+			Const(g, int64(result.DType())),
+		}
+		return
+	}, []any{
+		[]float64{5.0, 7.0, 9.0},
+		int64(dtypes.Float64),
+	}, -1)
+
+	// Test Int32 + Float32 -> Float32 (int to float promotion)
+	graphtest.RunTestGraphFn(t, "PromoteDType-Int32-Float32", func(g *Graph) (inputs, outputs []*Node) {
+		lhs := Const(g, []int32{1, 2, 3})
+		rhs := Const(g, []float32{4.5, 5.5, 6.5})
+		inputs = []*Node{lhs, rhs}
+
+		result := convertBinaryOp(Add, lhs, rhs)
+		outputs = []*Node{
+			result,
+			Const(g, int64(result.DType())),
+		}
+		return
+	}, []any{
+		[]float32{5.5, 7.5, 9.5},
+		int64(dtypes.Float32),
+	}, -1)
+
+	// Test Int32 + Int64 -> Int64
+	graphtest.RunTestGraphFn(t, "PromoteDType-Int32-Int64", func(g *Graph) (inputs, outputs []*Node) {
+		lhs := Const(g, []int32{1, 2, 3})
+		rhs := Const(g, []int64{4, 5, 6})
+		inputs = []*Node{lhs, rhs}
+
+		result := convertBinaryOp(Add, lhs, rhs)
+		outputs = []*Node{
+			result,
+			Const(g, int64(result.DType())),
+		}
+		return
+	}, []any{
+		[]int64{5, 7, 9},
+		int64(dtypes.Int64),
+	}, -1)
+
+	// Test same dtype (no promotion needed)
+	graphtest.RunTestGraphFn(t, "PromoteDType-SameType", func(g *Graph) (inputs, outputs []*Node) {
+		lhs := Const(g, []float32{1.0, 2.0, 3.0})
+		rhs := Const(g, []float32{4.0, 5.0, 6.0})
+		inputs = []*Node{lhs, rhs}
+
+		result := convertBinaryOp(Add, lhs, rhs)
+		outputs = []*Node{
+			result,
+			Const(g, int64(result.DType())),
+		}
+		return
+	}, []any{
+		[]float32{5.0, 7.0, 9.0},
+		int64(dtypes.Float32),
+	}, -1)
+}
+
+func TestConvertMatMulMixedDTypes(t *testing.T) {
+	// Test MatMul with mixed Float16 and Float32 inputs
+	graphtest.RunTestGraphFn(t, "MatMul-Mixed-Float16-Float32", func(g *Graph) (inputs, outputs []*Node) {
+		// Create Float16 matrix [2, 3]
+		lhs := Const(g, [][]float32{{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}})
+		lhs = ConvertDType(lhs, dtypes.Float16)
+		// Create Float32 matrix [3, 2]
+		rhs := Const(g, [][]float32{{1.0, 2.0}, {3.0, 4.0}, {5.0, 6.0}})
+		inputs = []*Node{lhs, rhs}
+
+		result := convertMatMul(lhs, rhs)
+		// Convert back to Float32 for comparison since test framework can't compare Float16 directly
+		outputs = []*Node{
+			ConvertDType(result, dtypes.Float32),
+			Const(g, int64(result.DType())),
+		}
+		return
+	}, []any{
+		// [1*1+2*3+3*5, 1*2+2*4+3*6] = [22, 28]
+		// [4*1+5*3+6*5, 4*2+5*4+6*6] = [49, 64]
+		[][]float32{{22.0, 28.0}, {49.0, 64.0}},
+		int64(dtypes.Float16), // Should be Float16 due to optimization
+	}, 1e-1)
+}
+
+func TestOnnxWhereMixedDTypes(t *testing.T) {
+	// Test Where with mixed dtypes for onTrue and onFalse
+	graphtest.RunTestGraphFn(t, "Where-Mixed-DTypes", func(g *Graph) (inputs, outputs []*Node) {
+		cond := Const(g, []bool{true, false, true})
+		onTrue := Const(g, []int32{1, 2, 3})
+		onFalse := Const(g, []float32{10.0, 20.0, 30.0})
+		inputs = []*Node{cond, onTrue, onFalse}
+		outputs = []*Node{
+			onnxWhere([]*Node{cond, onTrue, onFalse}),
+		}
+		return
+	}, []any{
+		// Result should be promoted to Float32
+		[]float32{1.0, 20.0, 3.0},
+	}, -1)
+}
+
+////////////////////////////////////////////////////////////////////
+//
+// Tests for Reduce operations (ReduceMax, ReduceMin, ReduceSum)
+//
+////////////////////////////////////////////////////////////////////
+
+func TestReduceMax(t *testing.T) {
+	// Test basic ReduceMax on axis 0
+	graphtest.RunTestGraphFn(t, "ReduceMax-axis0", func(g *Graph) (inputs, outputs []*Node) {
+		x := Const(g, [][]float32{{1.0, 5.0, 3.0}, {4.0, 2.0, 6.0}})
+		node := &protos.NodeProto{
+			OpType: "ReduceMax",
+			Attribute: []*protos.AttributeProto{
+				{Name: "axes", Type: protos.AttributeProto_INTS, Ints: []int64{0}},
+				{Name: "keepdims", Type: protos.AttributeProto_INT, I: 0},
+			},
+		}
+		inputs = []*Node{x}
+		outputs = []*Node{convertReduceMax(nil, nil, node, inputs)}
+		return
+	}, []any{
+		[]float32{4.0, 5.0, 6.0},
+	}, -1)
+
+	// Test ReduceMax with keepdims=1
+	graphtest.RunTestGraphFn(t, "ReduceMax-keepdims", func(g *Graph) (inputs, outputs []*Node) {
+		x := Const(g, [][]float32{{1.0, 5.0, 3.0}, {4.0, 2.0, 6.0}})
+		node := &protos.NodeProto{
+			OpType: "ReduceMax",
+			Attribute: []*protos.AttributeProto{
+				{Name: "axes", Type: protos.AttributeProto_INTS, Ints: []int64{1}},
+				{Name: "keepdims", Type: protos.AttributeProto_INT, I: 1},
+			},
+		}
+		inputs = []*Node{x}
+		outputs = []*Node{convertReduceMax(nil, nil, node, inputs)}
+		return
+	}, []any{
+		[][]float32{{5.0}, {6.0}},
+	}, -1)
+
+	// Test ReduceMax with no axes (reduce all)
+	graphtest.RunTestGraphFn(t, "ReduceMax-all", func(g *Graph) (inputs, outputs []*Node) {
+		x := Const(g, [][]float32{{1.0, 5.0, 3.0}, {4.0, 2.0, 6.0}})
+		node := &protos.NodeProto{
+			OpType: "ReduceMax",
+			Attribute: []*protos.AttributeProto{
+				{Name: "keepdims", Type: protos.AttributeProto_INT, I: 0},
+			},
+		}
+		inputs = []*Node{x}
+		outputs = []*Node{convertReduceMax(nil, nil, node, inputs)}
+		return
+	}, []any{
+		float32(6.0),
+	}, -1)
+
+	// Test ReduceMax with noop_with_empty_axes=1
+	graphtest.RunTestGraphFn(t, "ReduceMax-noop", func(g *Graph) (inputs, outputs []*Node) {
+		x := Const(g, [][]float32{{1.0, 5.0, 3.0}, {4.0, 2.0, 6.0}})
+		node := &protos.NodeProto{
+			OpType: "ReduceMax",
+			Attribute: []*protos.AttributeProto{
+				{Name: "noop_with_empty_axes", Type: protos.AttributeProto_INT, I: 1},
+			},
+		}
+		inputs = []*Node{x}
+		outputs = []*Node{convertReduceMax(nil, nil, node, inputs)}
+		return
+	}, []any{
+		// No-op: returns input unchanged
+		[][]float32{{1.0, 5.0, 3.0}, {4.0, 2.0, 6.0}},
+	}, -1)
+}
+
+func TestReduceMin(t *testing.T) {
+	// Test basic ReduceMin on axis 1
+	graphtest.RunTestGraphFn(t, "ReduceMin-axis1", func(g *Graph) (inputs, outputs []*Node) {
+		x := Const(g, [][]float32{{1.0, 5.0, 3.0}, {4.0, 2.0, 6.0}})
+		node := &protos.NodeProto{
+			OpType: "ReduceMin",
+			Attribute: []*protos.AttributeProto{
+				{Name: "axes", Type: protos.AttributeProto_INTS, Ints: []int64{1}},
+				{Name: "keepdims", Type: protos.AttributeProto_INT, I: 0},
+			},
+		}
+		inputs = []*Node{x}
+		outputs = []*Node{convertReduceMin(nil, nil, node, inputs)}
+		return
+	}, []any{
+		[]float32{1.0, 2.0},
+	}, -1)
+
+	// Test ReduceMin with negative axis
+	graphtest.RunTestGraphFn(t, "ReduceMin-negative-axis", func(g *Graph) (inputs, outputs []*Node) {
+		x := Const(g, [][]float32{{1.0, 5.0, 3.0}, {4.0, 2.0, 6.0}})
+		node := &protos.NodeProto{
+			OpType: "ReduceMin",
+			Attribute: []*protos.AttributeProto{
+				{Name: "axes", Type: protos.AttributeProto_INTS, Ints: []int64{-1}}, // Last axis
+				{Name: "keepdims", Type: protos.AttributeProto_INT, I: 0},
+			},
+		}
+		inputs = []*Node{x}
+		outputs = []*Node{convertReduceMin(nil, nil, node, inputs)}
+		return
+	}, []any{
+		[]float32{1.0, 2.0},
+	}, -1)
+}
+
+func TestReduceSum(t *testing.T) {
+	// Test basic ReduceSum on axis 0
+	graphtest.RunTestGraphFn(t, "ReduceSum-axis0", func(g *Graph) (inputs, outputs []*Node) {
+		x := Const(g, [][]float32{{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}})
+		node := &protos.NodeProto{
+			OpType: "ReduceSum",
+			Attribute: []*protos.AttributeProto{
+				{Name: "axes", Type: protos.AttributeProto_INTS, Ints: []int64{0}},
+				{Name: "keepdims", Type: protos.AttributeProto_INT, I: 0},
+			},
+		}
+		inputs = []*Node{x}
+		outputs = []*Node{convertReduceSum(nil, nil, node, inputs)}
+		return
+	}, []any{
+		[]float32{5.0, 7.0, 9.0},
+	}, -1)
+
+	// Test ReduceSum with keepdims=1
+	graphtest.RunTestGraphFn(t, "ReduceSum-keepdims", func(g *Graph) (inputs, outputs []*Node) {
+		x := Const(g, [][]float32{{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}})
+		node := &protos.NodeProto{
+			OpType: "ReduceSum",
+			Attribute: []*protos.AttributeProto{
+				{Name: "axes", Type: protos.AttributeProto_INTS, Ints: []int64{0}},
+				{Name: "keepdims", Type: protos.AttributeProto_INT, I: 1},
+			},
+		}
+		inputs = []*Node{x}
+		outputs = []*Node{convertReduceSum(nil, nil, node, inputs)}
+		return
+	}, []any{
+		[][]float32{{5.0, 7.0, 9.0}},
+	}, -1)
+
+	// Test ReduceSum with multiple axes
+	graphtest.RunTestGraphFn(t, "ReduceSum-multiple-axes", func(g *Graph) (inputs, outputs []*Node) {
+		x := Const(g, [][][]float32{
+			{{1.0, 2.0}, {3.0, 4.0}},
+			{{5.0, 6.0}, {7.0, 8.0}},
+		})
+		node := &protos.NodeProto{
+			OpType: "ReduceSum",
+			Attribute: []*protos.AttributeProto{
+				{Name: "axes", Type: protos.AttributeProto_INTS, Ints: []int64{0, 2}},
+				{Name: "keepdims", Type: protos.AttributeProto_INT, I: 0},
+			},
+		}
+		inputs = []*Node{x}
+		outputs = []*Node{convertReduceSum(nil, nil, node, inputs)}
+		return
+	}, []any{
+		// Sum over axes 0 and 2: [[1+2+5+6], [3+4+7+8]] = [14, 22]
+		[]float32{14.0, 22.0},
+	}, -1)
+
+	// Test ReduceSum with no axes (reduce all)
+	graphtest.RunTestGraphFn(t, "ReduceSum-all", func(g *Graph) (inputs, outputs []*Node) {
+		x := Const(g, [][]float32{{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}})
+		node := &protos.NodeProto{
+			OpType: "ReduceSum",
+			Attribute: []*protos.AttributeProto{
+				{Name: "keepdims", Type: protos.AttributeProto_INT, I: 0},
+			},
+		}
+		inputs = []*Node{x}
+		outputs = []*Node{convertReduceSum(nil, nil, node, inputs)}
+		return
+	}, []any{
+		float32(21.0),
+	}, -1)
+}
+
+////////////////////////////////////////////////////////////////////
+//
+// Tests for scalar edge cases
+//
+////////////////////////////////////////////////////////////////////
+
+func TestFlattenScalar(t *testing.T) {
+	// Test Flatten with scalar input - should produce [1, 1] shape
+	graphtest.RunTestGraphFn(t, "Flatten-scalar", func(g *Graph) (inputs, outputs []*Node) {
+		scalar := Const(g, float32(42.0))
+		node := &protos.NodeProto{
+			OpType: "Flatten",
+			Attribute: []*protos.AttributeProto{
+				{Name: "axis", Type: protos.AttributeProto_INT, I: 0},
+			},
+		}
+		inputs = []*Node{scalar}
+		result := convertFlatten(node, inputs)
+		outputs = []*Node{
+			result,
+			Const(g, result.Shape().Dimensions),
+		}
+		return
+	}, []any{
+		[][]float32{{42.0}},
+		[]int{1, 1},
+	}, -1)
+}
+
+func TestCumSumScalar(t *testing.T) {
+	// Test CumSum with scalar input - should return identity (or zero if exclusive)
+	graphtest.RunTestGraphFn(t, "CumSum-scalar", func(g *Graph) (inputs, outputs []*Node) {
+		scalar := Const(g, float32(42.0))
+		inputs = []*Node{scalar}
+		outputs = []*Node{
+			onnxCumSum(scalar, 0, false, false), // Normal
+			onnxCumSum(scalar, 0, true, false),  // Exclusive (should be 0)
+		}
+		return
+	}, []any{
+		float32(42.0),
+		float32(0.0),
+	}, -1)
+}

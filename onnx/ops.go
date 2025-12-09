@@ -93,14 +93,31 @@ func convertBinaryOp(fn gomlxBinaryOp, lhs, rhs *Node) *Node {
 }
 
 // promoteToCommonDType converts two nodes to a common dtype based on type promotion rules.
-// When one operand is Float16 and the other is Float32, we prefer Float16 to keep
-// operations in FP16 with NEON-accelerated kernels.
-// For other mixed types, higher precision is preferred: Float64 > Float32 > Float16/BFloat16 > Int64 > ...
+//
+// IMPORTANT: This function intentionally deviates from standard NumPy/PyTorch type promotion
+// rules in one specific case: when mixing Float16 and Float32, we promote to Float16 instead
+// of Float32. This is an intentional optimization to leverage NEON-accelerated FP16 kernels
+// on ARM64 platforms (e.g., Apple Silicon, modern ARM servers), which can provide significant
+// performance improvements for FP16 operations.
+//
+// Trade-offs of this design decision:
+//   - Pro: Up to 2x throughput on ARM64 with native FP16 SIMD (FMLAL/FMLAL2 instructions)
+//   - Pro: Reduced memory bandwidth for large tensors
+//   - Con: Potential precision loss compared to Float32 computation
+//   - Con: Non-standard behavior may surprise users expecting NumPy-like semantics
+//
+// For all other mixed-type combinations, standard promotion rules apply:
+// Float64 > Float32 > Float16/BFloat16 > Int64 > Int32 > Int16 > Int8 > Uint64 > ...
+//
+// Note: This behavior applies to ONNX models that have mixed Float16/Float32 tensors,
+// which commonly occurs in quantization-aware or mixed-precision trained models.
 func promoteToCommonDType(lhs, rhs *Node) (*Node, *Node) {
 	lhsDType := lhs.DType()
 	rhsDType := rhs.DType()
 
-	// Special case: prefer FP16 over Float32 to leverage NEON-accelerated FP16 kernels
+	// Special case: prefer FP16 over Float32 to leverage NEON-accelerated FP16 kernels.
+	// This is an intentional performance optimization for ARM64 platforms.
+	// See function documentation for trade-offs and rationale.
 	if (lhsDType == dtypes.Float16 && rhsDType == dtypes.Float32) ||
 		(lhsDType == dtypes.Float32 && rhsDType == dtypes.Float16) {
 		targetDType := dtypes.Float16
@@ -908,49 +925,7 @@ func convertReshape(m *Model, convertedOutputs map[string]*Node, node *protos.No
 // See ONNX documentation in:
 // https://onnx.ai/onnx/operators/onnx__ReduceMean.html
 func convertReduceMean(m *Model, convertedOutputs map[string]*Node, node *protos.NodeProto, inputs []*Node) *Node {
-	operand := inputs[0]
-	keepDims := getIntAttrOr(node, "keepdims", 1) > 0
-	noOpIfEmpty := getIntAttrOr(node, "noop_with_empty_axes", 0) > 0
-
-	var axes []int
-	if len(inputs) > 1 {
-		if !inputs[1].DType().IsInt() {
-			exceptions.Panicf("axes must be integer, got %s for node %s", inputs[1].DType(), nodeToString(node))
-		}
-
-		axesT, err := m.materializeConstantExpression(node.Input[1], convertedOutputs)
-		if err != nil {
-			panic(errors.WithMessagef(err, "while converting 'axes' for node %s", nodeToString(node)))
-		}
-		axes = tensorToInts(axesT)
-	}
-
-	axesFromAttr := getIntsAttrOr(node, "axes", nil)
-	if len(axesFromAttr) > 0 {
-		if len(axes) > 0 {
-			exceptions.Panicf("ReduceMean(operand, [axes]): axes and axes attribute cannot be used together for node %s", nodeToString(node))
-		}
-		axes = axesFromAttr
-	}
-
-	// If there are no axes to reduce, this is a no-op.
-	if len(axes) == 0 {
-		if noOpIfEmpty {
-			return Identity(operand)
-		} else {
-			res := ReduceAllMean(operand)
-			if keepDims {
-				res = ExpandLeftToRank(res, operand.Rank())
-			}
-			return res
-		}
-	}
-
-	if !keepDims {
-		return ReduceMean(operand, axes...)
-	} else {
-		return ReduceAndKeep(operand, ReduceMean, axes...)
-	}
+	return convertReduceGeneric(m, convertedOutputs, node, inputs, ReduceMean, ReduceAllMean, "ReduceMean")
 }
 
 // convertReduceMax converts a ONNX node to a GoMLX node.

@@ -14,6 +14,10 @@ func dtypeForONNX(onnxDType protos.TensorProto_DataType) (dtypes.DType, error) {
 		return dtypes.Float32, nil
 	case protos.TensorProto_DOUBLE:
 		return dtypes.Float64, nil
+	case protos.TensorProto_FLOAT16:
+		return dtypes.Float16, nil
+	case protos.TensorProto_BFLOAT16:
+		return dtypes.BFloat16, nil
 	case protos.TensorProto_INT32:
 		return dtypes.Int32, nil
 	case protos.TensorProto_INT64:

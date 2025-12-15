@@ -1428,3 +1428,230 @@ func TestCumSumScalar(t *testing.T) {
 		float32(0.0),
 	}, -1)
 }
+
+////////////////////////////////////////////////////////////////////
+//
+// Tests for RotaryEmbedding operator
+//
+////////////////////////////////////////////////////////////////////
+
+func TestRotaryEmbedding(t *testing.T) {
+	// Test basic 4D RotaryEmbedding with non-interleaved (half-rotated) pattern
+	graphtest.RunTestGraphFn(t, "RotaryEmbedding-4D-basic", func(g *Graph) (inputs, outputs []*Node) {
+		// Input: (batch_size=1, num_heads=1, seq_len=2, head_size=4)
+		x := Const(g, [][][][]float32{{{{1.0, 2.0, 3.0, 4.0}, {5.0, 6.0, 7.0, 8.0}}}})
+		// Position IDs: (batch_size=1, seq_len=2)
+		positionIds := Const(g, [][]int64{{0, 1}})
+		// Cos cache: (max_pos=2, head_size/2=2)
+		cosCache := Const(g, [][]float32{{1.0, 1.0}, {0.5, 0.5}})
+		// Sin cache: (max_pos=2, head_size/2=2)
+		sinCache := Const(g, [][]float32{{0.0, 0.0}, {0.866, 0.866}})
+
+		node := &protos.NodeProto{
+			OpType: "RotaryEmbedding",
+		}
+		inputs = []*Node{x, positionIds, cosCache, sinCache}
+		outputs = []*Node{
+			convertRotaryEmbedding(nil, nil, node, inputs),
+		}
+		return
+	}, []any{
+		// For position 0: cos=[1,1], sin=[0,0]
+		//   x1=[1,2], x2=[3,4]
+		//   y1 = x1*cos - x2*sin = [1,2] - [0,0] = [1,2]
+		//   y2 = x1*sin + x2*cos = [0,0] + [3,4] = [3,4]
+		// For position 1: cos=[0.5,0.5], sin=[0.866,0.866]
+		//   x1=[5,6], x2=[7,8]
+		//   y1 = x1*cos - x2*sin = [2.5,3] - [6.062,6.928] = [-3.562,-3.928]
+		//   y2 = x1*sin + x2*cos = [4.33,5.196] + [3.5,4] = [7.83,9.196]
+		[][][][]float32{{{{1.0, 2.0, 3.0, 4.0}, {-3.562, -3.928, 7.83, 9.196}}}},
+	}, 1e-2)
+
+	// Test RotaryEmbedding with interleaved pattern
+	graphtest.RunTestGraphFn(t, "RotaryEmbedding-4D-interleaved", func(g *Graph) (inputs, outputs []*Node) {
+		// Input: (batch_size=1, num_heads=1, seq_len=2, head_size=4)
+		x := Const(g, [][][][]float32{{{{1.0, 2.0, 3.0, 4.0}, {5.0, 6.0, 7.0, 8.0}}}})
+		// Position IDs: (batch_size=1, seq_len=2)
+		positionIds := Const(g, [][]int64{{0, 1}})
+		// Cos cache: (max_pos=2, head_size/2=2)
+		cosCache := Const(g, [][]float32{{1.0, 1.0}, {0.5, 0.5}})
+		// Sin cache: (max_pos=2, head_size/2=2)
+		sinCache := Const(g, [][]float32{{0.0, 0.0}, {0.866, 0.866}})
+
+		node := &protos.NodeProto{
+			OpType: "RotaryEmbedding",
+			Attribute: []*protos.AttributeProto{
+				{Name: "interleaved", Type: protos.AttributeProto_INT, I: 1},
+			},
+		}
+		inputs = []*Node{x, positionIds, cosCache, sinCache}
+		outputs = []*Node{
+			convertRotaryEmbedding(nil, nil, node, inputs),
+		}
+		return
+	}, []any{
+		// For interleaved pattern:
+		// For position 0: cos=[1,1], sin=[0,0]
+		//   x_even=[1,3], x_odd=[2,4]
+		//   y_even = x_even*cos - x_odd*sin = [1,3] - [0,0] = [1,3]
+		//   y_odd = x_even*sin + x_odd*cos = [0,0] + [2,4] = [2,4]
+		//   result = interleave(y_even, y_odd) = [1,2,3,4]
+		// For position 1: cos=[0.5,0.5], sin=[0.866,0.866]
+		//   x_even=[5,7], x_odd=[6,8]
+		//   y_even = x_even*cos - x_odd*sin = [2.5,3.5] - [5.196,6.928] = [-2.696,-3.428]
+		//   y_odd = x_even*sin + x_odd*cos = [4.33,6.062] + [3,4] = [7.33,10.062]
+		//   result = interleave(y_even, y_odd) = [-2.696, 7.33, -3.428, 10.062]
+		[][][][]float32{{{{1.0, 2.0, 3.0, 4.0}, {-2.696, 7.33, -3.428, 10.062}}}},
+	}, 1e-2)
+
+	// Test 3D input with num_heads attribute
+	graphtest.RunTestGraphFn(t, "RotaryEmbedding-3D", func(g *Graph) (inputs, outputs []*Node) {
+		// Input: (batch_size=1, seq_len=2, hidden_size=4) with num_heads=1
+		x := Const(g, [][][]float32{{{1.0, 2.0, 3.0, 4.0}, {5.0, 6.0, 7.0, 8.0}}})
+		// Position IDs: (batch_size=1, seq_len=2)
+		positionIds := Const(g, [][]int64{{0, 1}})
+		// Cos cache: (max_pos=2, head_size/2=2)
+		cosCache := Const(g, [][]float32{{1.0, 1.0}, {0.5, 0.5}})
+		// Sin cache: (max_pos=2, head_size/2=2)
+		sinCache := Const(g, [][]float32{{0.0, 0.0}, {0.866, 0.866}})
+
+		node := &protos.NodeProto{
+			OpType: "RotaryEmbedding",
+			Attribute: []*protos.AttributeProto{
+				{Name: "num_heads", Type: protos.AttributeProto_INT, I: 1},
+			},
+		}
+		inputs = []*Node{x, positionIds, cosCache, sinCache}
+		outputs = []*Node{
+			convertRotaryEmbedding(nil, nil, node, inputs),
+		}
+		return
+	}, []any{
+		// Should produce same results as 4D case, but with 3D output shape
+		[][][]float32{{{1.0, 2.0, 3.0, 4.0}, {-3.562, -3.928, 7.83, 9.196}}},
+	}, 1e-2)
+
+	// Test partial rotation (rotary_embedding_dim < head_size)
+	graphtest.RunTestGraphFn(t, "RotaryEmbedding-partial-rotation", func(g *Graph) (inputs, outputs []*Node) {
+		// Input: (batch_size=1, num_heads=1, seq_len=1, head_size=8)
+		x := Const(g, [][][][]float32{{{{1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0}}}})
+		// Position IDs: (batch_size=1, seq_len=1)
+		positionIds := Const(g, [][]int64{{0}})
+		// Cos cache: (max_pos=1, rotary_dim/2=2) - only rotating first 4 dimensions
+		cosCache := Const(g, [][]float32{{0.0, 0.0}})
+		// Sin cache
+		sinCache := Const(g, [][]float32{{1.0, 1.0}})
+
+		node := &protos.NodeProto{
+			OpType: "RotaryEmbedding",
+			Attribute: []*protos.AttributeProto{
+				{Name: "rotary_embedding_dim", Type: protos.AttributeProto_INT, I: 4},
+			},
+		}
+		inputs = []*Node{x, positionIds, cosCache, sinCache}
+		outputs = []*Node{
+			convertRotaryEmbedding(nil, nil, node, inputs),
+		}
+		return
+	}, []any{
+		// Only first 4 dimensions are rotated (rotary_embedding_dim=4)
+		// x1=[1,2], x2=[3,4] (rotated part), x_pass=[5,6,7,8] (passthrough)
+		// cos=[0,0], sin=[1,1]
+		// y1 = x1*cos - x2*sin = [0,0] - [3,4] = [-3,-4]
+		// y2 = x1*sin + x2*cos = [1,2] + [0,0] = [1,2]
+		// result = concat(y1, y2, x_pass) = [-3,-4,1,2,5,6,7,8]
+		[][][][]float32{{{{-3.0, -4.0, 1.0, 2.0, 5.0, 6.0, 7.0, 8.0}}}},
+	}, 1e-3)
+
+	// Test with computed sin_cache (only cos_cache provided)
+	graphtest.RunTestGraphFn(t, "RotaryEmbedding-computed-sin", func(g *Graph) (inputs, outputs []*Node) {
+		// Input: (batch_size=1, num_heads=1, seq_len=1, head_size=4)
+		x := Const(g, [][][][]float32{{{{1.0, 2.0, 3.0, 4.0}}}})
+		// Position IDs: (batch_size=1, seq_len=1)
+		positionIds := Const(g, [][]int64{{0}})
+		// Cos cache: cos(0) = 1.0 for all dimensions
+		cosCache := Const(g, [][]float32{{1.0, 1.0}})
+		// sin_cache not provided - should be computed as sqrt(1 - cos^2) = 0
+
+		node := &protos.NodeProto{
+			OpType: "RotaryEmbedding",
+		}
+		inputs = []*Node{x, positionIds, cosCache} // Only 3 inputs
+		outputs = []*Node{
+			convertRotaryEmbedding(nil, nil, node, inputs),
+		}
+		return
+	}, []any{
+		// With cos=1, computed sin = sqrt(1 - 1^2) = 0
+		// y1 = x1*1 - x2*0 = [1,2]
+		// y2 = x1*0 + x2*1 = [3,4]
+		// result = [1,2,3,4]
+		[][][][]float32{{{{1.0, 2.0, 3.0, 4.0}}}},
+	}, 1e-3)
+
+	// Test with multiple heads
+	graphtest.RunTestGraphFn(t, "RotaryEmbedding-multi-head", func(g *Graph) (inputs, outputs []*Node) {
+		// Input: (batch_size=1, num_heads=2, seq_len=1, head_size=4)
+		x := Const(g, [][][][]float32{{
+			{{1.0, 2.0, 3.0, 4.0}}, // Head 0
+			{{5.0, 6.0, 7.0, 8.0}}, // Head 1
+		}})
+		// Position IDs: (batch_size=1, seq_len=1)
+		positionIds := Const(g, [][]int64{{0}})
+		// Cos cache
+		cosCache := Const(g, [][]float32{{0.0, 0.0}})
+		// Sin cache
+		sinCache := Const(g, [][]float32{{1.0, 1.0}})
+
+		node := &protos.NodeProto{
+			OpType: "RotaryEmbedding",
+		}
+		inputs = []*Node{x, positionIds, cosCache, sinCache}
+		outputs = []*Node{
+			convertRotaryEmbedding(nil, nil, node, inputs),
+		}
+		return
+	}, []any{
+		// Both heads get rotated with the same cos/sin values
+		// Head 0: x1=[1,2], x2=[3,4], cos=[0,0], sin=[1,1]
+		//   y1 = [0,0] - [3,4] = [-3,-4]
+		//   y2 = [1,2] + [0,0] = [1,2]
+		// Head 1: x1=[5,6], x2=[7,8], cos=[0,0], sin=[1,1]
+		//   y1 = [0,0] - [7,8] = [-7,-8]
+		//   y2 = [5,6] + [0,0] = [5,6]
+		[][][][]float32{{
+			{{-3.0, -4.0, 1.0, 2.0}},
+			{{-7.0, -8.0, 5.0, 6.0}},
+		}},
+	}, 1e-3)
+
+	// Test position_ids broadcasting (batch_size=1 broadcasting to batch_size=2)
+	graphtest.RunTestGraphFn(t, "RotaryEmbedding-position-broadcast", func(g *Graph) (inputs, outputs []*Node) {
+		// Input: (batch_size=2, num_heads=1, seq_len=1, head_size=4)
+		x := Const(g, [][][][]float32{
+			{{{1.0, 2.0, 3.0, 4.0}}},     // Batch 0
+			{{{10.0, 20.0, 30.0, 40.0}}}, // Batch 1
+		})
+		// Position IDs with batch_size=1: (1, seq_len=1) - should broadcast
+		positionIds := Const(g, [][]int64{{0}})
+		// Cos cache
+		cosCache := Const(g, [][]float32{{0.0, 0.0}})
+		// Sin cache
+		sinCache := Const(g, [][]float32{{1.0, 1.0}})
+
+		node := &protos.NodeProto{
+			OpType: "RotaryEmbedding",
+		}
+		inputs = []*Node{x, positionIds, cosCache, sinCache}
+		outputs = []*Node{
+			convertRotaryEmbedding(nil, nil, node, inputs),
+		}
+		return
+	}, []any{
+		// Same rotation applied to both batches (position_ids broadcasts)
+		[][][][]float32{
+			{{{-3.0, -4.0, 1.0, 2.0}}},
+			{{{-30.0, -40.0, 10.0, 20.0}}},
+		},
+	}, 1e-3)
+}

@@ -2417,3 +2417,243 @@ func convertIf(m *Model, convertedOutputs map[string]*Node, node *protos.NodePro
 	}
 	return nil
 }
+
+// convertRotaryEmbedding converts the corresponding ONNX node to GoMLX nodes.
+//
+// RotaryEmbedding implements rotary positional embeddings (RoPE) based on https://arxiv.org/pdf/2104.09864.
+// RoPE allows the model to understand both absolute token positions and relative distances between tokens
+// through a rotational mechanism.
+//
+// Inputs:
+//   - X (required): Input tensor - 4D: (batch_size, num_heads, sequence_length, head_size)
+//     or 3D: (batch_size, sequence_length, hidden_size)
+//   - position_ids (required): Position indices - shape (batch_size, sequence_length) or (1, sequence_length)
+//   - cos_cache (required): Cosine rotation values - shape (max_position_id+1, head_size/2)
+//   - sin_cache (optional): Sine rotation values - same shape as cos_cache. If not provided, computed as sqrt(1 - cos^2)
+//
+// Attributes:
+//   - interleaved (int, default 0): If 1, rotary uses interleaved pattern; if 0, uses half-rotated pattern
+//   - num_heads (int, optional): Required when input is 3D
+//   - rotary_embedding_dim (int, optional): Dimension for partial rotation (default: head_size)
+//
+// See ONNX documentation in:
+// https://onnx.ai/onnx/operators/onnx__RotaryEmbedding.html
+func convertRotaryEmbedding(_ *Model, _ map[string]*Node, node *protos.NodeProto, inputs []*Node) *Node {
+	if len(inputs) < 3 {
+		exceptions.Panicf("RotaryEmbedding requires at least 3 inputs (X, position_ids, cos_cache), got %d in node %s",
+			len(inputs), nodeToString(node))
+	}
+
+	x := inputs[0]
+	positionIds := inputs[1]
+	cosCache := inputs[2]
+
+	// Get optional sin_cache or compute it from cos_cache
+	var sinCache *Node
+	if len(inputs) > 3 && inputs[3] != nil {
+		sinCache = inputs[3]
+	} else {
+		// Compute sin_cache from cos_cache: sin = sqrt(1 - cos^2)
+		// This is valid because sin^2 + cos^2 = 1
+		g := cosCache.Graph()
+		one := Scalar(g, cosCache.DType(), 1.0)
+		sinCache = Sqrt(Sub(one, Square(cosCache)))
+	}
+
+	// Get attributes
+	interleaved := getBoolAttrOr(node, "interleaved", false)
+	numHeads := getIntAttrOr(node, "num_heads", 0)
+	rotaryEmbeddingDim := getIntAttrOr(node, "rotary_embedding_dim", 0)
+
+	// Handle dtype conversion for cos_cache and sin_cache if needed
+	if cosCache.DType() != x.DType() {
+		cosCache = ConvertDType(cosCache, x.DType())
+	}
+	if sinCache.DType() != x.DType() {
+		sinCache = ConvertDType(sinCache, x.DType())
+	}
+
+	// Determine if input is 3D or 4D
+	inputRank := x.Rank()
+	originalShape := x.Shape().Dimensions
+
+	var is3D bool
+	var batchSize, seqLen, headSize int
+
+	if inputRank == 3 {
+		// 3D: (batch_size, sequence_length, hidden_size)
+		is3D = true
+		if numHeads <= 0 {
+			exceptions.Panicf("RotaryEmbedding: num_heads attribute is required for 3D input in node %s", nodeToString(node))
+		}
+		batchSize = originalShape[0]
+		seqLen = originalShape[1]
+		hiddenSize := originalShape[2]
+		headSize = hiddenSize / numHeads
+
+		// Reshape to 4D: (batch_size, num_heads, sequence_length, head_size)
+		x = Reshape(x, batchSize, seqLen, numHeads, headSize)
+		x = TransposeAllAxes(x, 0, 2, 1, 3) // (batch_size, num_heads, sequence_length, head_size)
+	} else if inputRank == 4 {
+		// 4D: (batch_size, num_heads, sequence_length, head_size)
+		is3D = false
+		batchSize = originalShape[0]
+		numHeads = originalShape[1]
+		seqLen = originalShape[2]
+		headSize = originalShape[3]
+	} else {
+		exceptions.Panicf("RotaryEmbedding: input X must be 3D or 4D, got rank %d in node %s", inputRank, nodeToString(node))
+	}
+
+	// Determine rotary dimension
+	if rotaryEmbeddingDim <= 0 || rotaryEmbeddingDim > headSize {
+		rotaryEmbeddingDim = headSize
+	}
+	halfRotaryDim := rotaryEmbeddingDim / 2
+
+	// Gather cos and sin values using position_ids
+	// position_ids has shape (batch_size, sequence_length) or (1, sequence_length)
+	// cos_cache has shape (max_position_id+1, head_size/2)
+	// We need to gather cos and sin values for each position
+
+	// Flatten position_ids for gathering
+	positionIdsFlat := Reshape(positionIds, -1)
+
+	// Gather cos and sin values
+	// Result shapes: (num_positions, half_rotary_dim)
+	cosGathered := Gather(cosCache, ExpandAxes(positionIdsFlat, -1))
+	sinGathered := Gather(sinCache, ExpandAxes(positionIdsFlat, -1))
+
+	// Reshape gathered values to match input tensor broadcasting needs
+	// We need shape (batch_size, 1, sequence_length, half_rotary_dim) for broadcasting with (batch_size, num_heads, sequence_length, head_size)
+	posIdsBatchSize := positionIds.Shape().Dim(0)
+	cosGathered = Reshape(cosGathered, posIdsBatchSize, seqLen, halfRotaryDim)
+	sinGathered = Reshape(sinGathered, posIdsBatchSize, seqLen, halfRotaryDim)
+
+	// Add num_heads dimension for broadcasting
+	cosGathered = ExpandAxes(cosGathered, 1) // (batch_size, 1, sequence_length, half_rotary_dim)
+	sinGathered = ExpandAxes(sinGathered, 1)
+
+	// Apply rotary embedding
+	var result *Node
+	if interleaved {
+		result = applyRotaryEmbeddingInterleaved(x, cosGathered, sinGathered, rotaryEmbeddingDim, headSize)
+	} else {
+		result = applyRotaryEmbeddingHalfRotated(x, cosGathered, sinGathered, rotaryEmbeddingDim, headSize)
+	}
+
+	// If original input was 3D, reshape back
+	if is3D {
+		// Transpose back: (batch_size, num_heads, sequence_length, head_size) -> (batch_size, sequence_length, num_heads, head_size)
+		result = TransposeAllAxes(result, 0, 2, 1, 3)
+		// Reshape to 3D: (batch_size, sequence_length, hidden_size)
+		result = Reshape(result, originalShape...)
+	}
+
+	return result
+}
+
+// applyRotaryEmbeddingHalfRotated applies rotary embedding using the half-rotated pattern.
+// For the non-interleaved (half-rotated) case:
+//
+//	x1, x2 = split(x, 2, dim=-1)  # Split last dimension in half
+//	y1 = x1 * cos - x2 * sin
+//	y2 = x1 * sin + x2 * cos
+//	y = concat(y1, y2, dim=-1)
+func applyRotaryEmbeddingHalfRotated(x, cos, sin *Node, rotaryDim, headSize int) *Node {
+	halfRotaryDim := rotaryDim / 2
+
+	if rotaryDim < headSize {
+		// Partial rotation: only rotate the first rotary_dim dimensions
+		// Split x into rotated and passthrough parts
+		xRotate := Slice(x, AxisRange(), AxisRange(), AxisRange(), AxisRange(0, rotaryDim))
+		xPassthrough := Slice(x, AxisRange(), AxisRange(), AxisRange(), AxisRange(rotaryDim, headSize))
+
+		// Split rotated part into two halves
+		x1 := Slice(xRotate, AxisRange(), AxisRange(), AxisRange(), AxisRange(0, halfRotaryDim))
+		x2 := Slice(xRotate, AxisRange(), AxisRange(), AxisRange(), AxisRange(halfRotaryDim, rotaryDim))
+
+		// Apply rotation
+		y1 := Sub(Mul(x1, cos), Mul(x2, sin))
+		y2 := Add(Mul(x1, sin), Mul(x2, cos))
+
+		// Concatenate rotated parts
+		yRotated := Concatenate([]*Node{y1, y2}, -1)
+
+		// Concatenate with passthrough
+		return Concatenate([]*Node{yRotated, xPassthrough}, -1)
+	}
+
+	// Full rotation
+	x1 := Slice(x, AxisRange(), AxisRange(), AxisRange(), AxisRange(0, halfRotaryDim))
+	x2 := Slice(x, AxisRange(), AxisRange(), AxisRange(), AxisRange(halfRotaryDim, headSize))
+
+	// Apply rotation: y1 = x1 * cos - x2 * sin, y2 = x1 * sin + x2 * cos
+	y1 := Sub(Mul(x1, cos), Mul(x2, sin))
+	y2 := Add(Mul(x1, sin), Mul(x2, cos))
+
+	return Concatenate([]*Node{y1, y2}, -1)
+}
+
+// applyRotaryEmbeddingInterleaved applies rotary embedding using the interleaved pattern.
+// For the interleaved case:
+//
+//	x_even = x[..., 0::2]  # Even indices
+//	x_odd = x[..., 1::2]   # Odd indices
+//	y_even = x_even * cos - x_odd * sin
+//	y_odd = x_even * sin + x_odd * cos
+//	y[..., 0::2] = y_even
+//	y[..., 1::2] = y_odd
+func applyRotaryEmbeddingInterleaved(x, cos, sin *Node, rotaryDim, headSize int) *Node {
+	halfRotaryDim := rotaryDim / 2
+
+	if rotaryDim < headSize {
+		// Partial rotation: only rotate the first rotary_dim dimensions
+		xRotate := Slice(x, AxisRange(), AxisRange(), AxisRange(), AxisRange(0, rotaryDim))
+		xPassthrough := Slice(x, AxisRange(), AxisRange(), AxisRange(), AxisRange(rotaryDim, headSize))
+
+		// Extract even and odd indices from the rotation part using strided slice
+		xEven := Slice(xRotate, AxisRange(), AxisRange(), AxisRange(), AxisRange(0, rotaryDim).Stride(2))
+		xOdd := Slice(xRotate, AxisRange(), AxisRange(), AxisRange(), AxisRange(1, rotaryDim).Stride(2))
+
+		// Apply rotation
+		yEven := Sub(Mul(xEven, cos), Mul(xOdd, sin))
+		yOdd := Add(Mul(xEven, sin), Mul(xOdd, cos))
+
+		// Interleave the results back
+		yRotated := interleaveLastAxis(yEven, yOdd)
+
+		// Concatenate with passthrough
+		return Concatenate([]*Node{yRotated, xPassthrough}, -1)
+	}
+
+	// Full rotation with interleaved pattern
+	// Extract even and odd indices
+	xEven := Slice(x, AxisRange(), AxisRange(), AxisRange(), AxisRange(0, headSize).Stride(2))
+	xOdd := Slice(x, AxisRange(), AxisRange(), AxisRange(), AxisRange(1, headSize).Stride(2))
+
+	// Apply rotation
+	yEven := Sub(Mul(xEven, cos), Mul(xOdd, sin))
+	yOdd := Add(Mul(xEven, sin), Mul(xOdd, cos))
+
+	// Interleave the results back
+	return interleaveLastAxis(yEven, yOdd)
+}
+
+// interleaveLastAxis interleaves two tensors along the last axis.
+// Given tensors a and b with shape [..., N], produces output with shape [..., 2*N]
+// where output[..., 0::2] = a and output[..., 1::2] = b
+func interleaveLastAxis(a, b *Node) *Node {
+	// Stack a and b to create shape [..., N, 2]
+	aExpanded := ExpandAxes(a, -1)                            // [..., N, 1]
+	bExpanded := ExpandAxes(b, -1)                            // [..., N, 1]
+	stacked := Concatenate([]*Node{aExpanded, bExpanded}, -1) // [..., N, 2]
+
+	// Reshape to flatten the last two dimensions: [..., N*2]
+	shape := a.Shape().Dimensions
+	newShape := make([]int, len(shape))
+	copy(newShape, shape)
+	newShape[len(newShape)-1] = shape[len(shape)-1] * 2
+
+	return Reshape(stacked, newShape...)
+}

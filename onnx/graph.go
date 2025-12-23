@@ -441,6 +441,40 @@ func (m *Model) convertNode(_ *context.Context, g *Graph, node *protos.NodeProto
 		result = Sin(inputs[0])
 	case "Cos":
 		result = Cos(inputs[0])
+	case "Sigmoid":
+		result = convertSigmoid(inputs)
+	case "Reciprocal":
+		result = convertReciprocal(inputs)
+	case "Round":
+		result = convertRound(inputs)
+	case "Tan":
+		result = convertTan(inputs)
+	case "Sinh":
+		result = convertSinh(inputs)
+	case "Cosh":
+		result = convertCosh(inputs)
+	case "Asin":
+		result = convertAsin(inputs)
+	case "Acos":
+		result = convertAcos(inputs)
+	case "Atan":
+		result = convertAtan(inputs)
+	case "Asinh":
+		result = convertAsinh(inputs)
+	case "Acosh":
+		result = convertAcosh(inputs)
+	case "Atanh":
+		result = convertAtanh(inputs)
+	case "IsNaN":
+		result = convertIsNaN(inputs)
+	case "Softplus":
+		result = convertSoftplus(inputs)
+	case "Softsign":
+		result = convertSoftsign(inputs)
+	case "Mish":
+		result = convertMish(inputs)
+	case "HardSwish":
+		result = convertHardSwish(inputs)
 
 	// Ops with equivalents:
 	case "MatMul":
@@ -455,6 +489,18 @@ func (m *Model) convertNode(_ *context.Context, g *Graph, node *protos.NodeProto
 		result = convertMin(inputs)
 	case "Max":
 		result = convertMax(inputs)
+	case "Sum":
+		result = convertSum(inputs)
+	case "Mean":
+		result = convertMean(inputs)
+	case "PRelu":
+		result = convertPRelu(inputs)
+	case "CastLike":
+		result = convertCastLike(inputs)
+	case "Size":
+		result = convertSize(inputs)
+	case "GlobalMaxPool":
+		result = convertGlobalMaxPool(inputs)
 
 	// Ops with attributes:
 	case "Constant":
@@ -485,6 +531,58 @@ func (m *Model) convertNode(_ *context.Context, g *Graph, node *protos.NodeProto
 		result = convertMatMulInteger(node, inputs)
 	case "QLinearMatMul":
 		result = convertQLinearMatMul(node, inputs)
+	case "LeakyRelu":
+		result = convertLeakyRelu(node, inputs)
+	case "Elu":
+		result = convertElu(node, inputs)
+	case "Selu":
+		result = convertSelu(node, inputs)
+	case "Celu":
+		result = convertCelu(node, inputs)
+	case "HardSigmoid":
+		result = convertHardSigmoid(node, inputs)
+	case "ThresholdedRelu":
+		result = convertThresholdedRelu(node, inputs)
+	case "Gelu":
+		result = convertGelu(node, inputs)
+	case "LogSoftmax":
+		result = convertLogSoftmax(node, inputs)
+	case "Hardmax":
+		result = convertHardmax(node, inputs)
+	case "Shrink":
+		result = convertShrink(node, inputs)
+	case "ArgMax":
+		result = convertArgMax(node, inputs)
+	case "ArgMin":
+		result = convertArgMin(node, inputs)
+	case "Mod":
+		result = convertMod(node, inputs)
+	case "IsInf":
+		result = convertIsInf(node, inputs)
+	case "BitShift":
+		result = convertBitShift(node, inputs)
+	case "EyeLike":
+		result = convertEyeLike(node, inputs)
+	case "DepthToSpace":
+		result = convertDepthToSpace(node, inputs)
+	case "SpaceToDepth":
+		result = convertSpaceToDepth(node, inputs)
+	case "GatherND":
+		result = convertGatherND(node, inputs)
+	case "ScatterElements":
+		result = convertScatterElements(node, inputs)
+	case "LRN":
+		result = convertLRN(node, inputs)
+	case "InstanceNormalization":
+		result = convertInstanceNormalization(node, inputs)
+	case "GlobalLpPool":
+		result = convertGlobalLpPool(node, inputs)
+	case "LpNormalization":
+		result = convertLpNormalization(node, inputs)
+	case "MeanVarianceNormalization":
+		result = convertMeanVarianceNormalization(node, inputs)
+	case "Einsum":
+		result = convertEinsum(node, inputs)
 
 	// Ops that require constant sub-expression materialization:
 	// they take dynamic (graph) values in ONNX but only take static values in XLA
@@ -508,6 +606,32 @@ func (m *Model) convertNode(_ *context.Context, g *Graph, node *protos.NodeProto
 		result = convertRange(m, convertedOutputs, node, inputs)
 	case "CumSum":
 		result = convertCumSum(m, convertedOutputs, node, inputs)
+	case "ReduceMax":
+		result = convertReduceMax(m, convertedOutputs, node, inputs)
+	case "ReduceMin":
+		result = convertReduceMin(m, convertedOutputs, node, inputs)
+	case "ReduceSum":
+		result = convertReduceSum(m, convertedOutputs, node, inputs)
+	case "ReduceProd":
+		result = convertReduceProd(m, convertedOutputs, node, inputs)
+	case "ReduceL1":
+		result = convertReduceL1(m, convertedOutputs, node, inputs)
+	case "ReduceL2":
+		result = convertReduceL2(m, convertedOutputs, node, inputs)
+	case "ReduceLogSum":
+		result = convertReduceLogSum(m, convertedOutputs, node, inputs)
+	case "ReduceLogSumExp":
+		result = convertReduceLogSumExp(m, convertedOutputs, node, inputs)
+	case "ReduceSumSquare":
+		result = convertReduceSumSquare(m, convertedOutputs, node, inputs)
+	case "OneHot":
+		result = convertOneHot(m, convertedOutputs, node, inputs)
+	case "Compress":
+		result = convertCompress(m, convertedOutputs, node, inputs)
+	case "ReverseSequence":
+		result = convertReverseSequence(m, convertedOutputs, node, inputs)
+	case "NonZero":
+		result = convertNonZero(m, convertedOutputs, node, inputs)
 
 	// Full ML layers ops:
 	case "LSTM":
@@ -536,6 +660,19 @@ func (m *Model) convertNode(_ *context.Context, g *Graph, node *protos.NodeProto
 		result = convertTrilu(m, convertedOutputs, node, inputs)
 	case "ScatterND":
 		result = convertScatterND(m, convertedOutputs, node, inputs)
+	case "Dropout":
+		result = convertDropout(convertedOutputs, node, inputs)
+	case "TopK":
+		results, err := convertTopK(m, convertedOutputs, node, inputs)
+		if err != nil {
+			panic(err)
+		}
+		// TopK returns two outputs: values and indices
+		convertedOutputs[node.Output[0]] = results[0]
+		if len(node.Output) > 1 && node.Output[1] != "" {
+			convertedOutputs[node.Output[1]] = results[1]
+		}
+		return
 
 	// Control flow ops:
 	case "If":

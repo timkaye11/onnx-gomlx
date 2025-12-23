@@ -142,8 +142,7 @@ func convertDepthToSpace(node *protos.NodeProto, inputs []*Node) *Node {
 		exceptions.Panicf("DepthToSpace requires 4D input, got rank %d", x.Rank())
 	}
 
-	dims := x.Shape().Dimensions
-	n, c, h, w := dims[0], dims[1], dims[2], dims[3]
+	n, c, h, w := extract4DShape(x)
 
 	if c%(blocksize*blocksize) != 0 {
 		exceptions.Panicf("DepthToSpace: C (%d) must be divisible by blocksize^2 (%d)", c, blocksize*blocksize)
@@ -155,21 +154,17 @@ func convertDepthToSpace(node *protos.NodeProto, inputs []*Node) *Node {
 
 	if mode == "DCR" {
 		// DCR mode: depth-column-row
-		// Reshape to [N, blocksize, blocksize, newC, H, W]
-		reshaped := Reshape(x, n, blocksize, blocksize, newC, h, w)
-		// Transpose to [N, newC, H, blocksize, W, blocksize]
-		transposed := TransposeAllAxes(reshaped, 0, 3, 4, 1, 5, 2)
-		// Reshape to [N, newC, newH, newW]
-		return Reshape(transposed, n, newC, newH, newW)
+		return reshapeTransposeReshape(x,
+			[]int{n, blocksize, blocksize, newC, h, w},
+			[]int{0, 3, 4, 1, 5, 2},
+			[]int{n, newC, newH, newW})
 	}
 
 	// CRD mode: column-row-depth
-	// Reshape to [N, newC, blocksize, blocksize, H, W]
-	reshaped := Reshape(x, n, newC, blocksize, blocksize, h, w)
-	// Transpose to [N, newC, H, blocksize, W, blocksize]
-	transposed := TransposeAllAxes(reshaped, 0, 1, 4, 2, 5, 3)
-	// Reshape to [N, newC, newH, newW]
-	return Reshape(transposed, n, newC, newH, newW)
+	return reshapeTransposeReshape(x,
+		[]int{n, newC, blocksize, blocksize, h, w},
+		[]int{0, 1, 4, 2, 5, 3},
+		[]int{n, newC, newH, newW})
 }
 
 // convertSpaceToDepth converts a ONNX SpaceToDepth node to a GoMLX node.
@@ -186,8 +181,7 @@ func convertSpaceToDepth(node *protos.NodeProto, inputs []*Node) *Node {
 		exceptions.Panicf("SpaceToDepth requires 4D input, got rank %d", x.Rank())
 	}
 
-	dims := x.Shape().Dimensions
-	n, c, h, w := dims[0], dims[1], dims[2], dims[3]
+	n, c, h, w := extract4DShape(x)
 
 	if h%blocksize != 0 || w%blocksize != 0 {
 		exceptions.Panicf("SpaceToDepth: H (%d) and W (%d) must be divisible by blocksize (%d)", h, w, blocksize)
@@ -197,12 +191,10 @@ func convertSpaceToDepth(node *protos.NodeProto, inputs []*Node) *Node {
 	newH := h / blocksize
 	newW := w / blocksize
 
-	// Reshape to [N, C, H/blocksize, blocksize, W/blocksize, blocksize]
-	reshaped := Reshape(x, n, c, newH, blocksize, newW, blocksize)
-	// Transpose to [N, blocksize, blocksize, C, H/blocksize, W/blocksize]
-	transposed := TransposeAllAxes(reshaped, 0, 3, 5, 1, 2, 4)
-	// Reshape to [N, newC, newH, newW]
-	return Reshape(transposed, n, newC, newH, newW)
+	return reshapeTransposeReshape(x,
+		[]int{n, c, newH, blocksize, newW, blocksize},
+		[]int{0, 3, 5, 1, 2, 4},
+		[]int{n, newC, newH, newW})
 }
 
 // convertGatherND converts a ONNX GatherND node to a GoMLX node.

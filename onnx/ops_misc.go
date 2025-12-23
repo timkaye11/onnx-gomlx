@@ -158,25 +158,11 @@ func convertInstanceNormalization(node *protos.NodeProto, inputs []*Node) *Node 
 		exceptions.Panicf("InstanceNormalization requires at least 3D input, got rank %d", x.Rank())
 	}
 
-	g := x.Graph()
-	dtype := x.DType()
-	epsilonNode := Scalar(g, dtype, epsilon)
-
 	// Normalize over spatial dimensions (all except batch and channel)
-	spatialAxes := make([]int, x.Rank()-2)
-	for i := 2; i < x.Rank(); i++ {
-		spatialAxes[i-2] = i
-	}
-
-	// Calculate mean and variance over spatial dimensions
-	mean := ReduceAndKeep(x, ReduceMean, spatialAxes...)
-
-	// Variance = E[(x - mean)^2]
-	centered := Sub(x, mean)
-	variance := ReduceAndKeep(Mul(centered, centered), ReduceMean, spatialAxes...)
+	spatialAxes := getSpatialAxes(x)
 
 	// Normalize: (x - mean) / sqrt(variance + epsilon)
-	normalized := Div(centered, Sqrt(Add(variance, epsilonNode)))
+	normalized := normalizeWithMeanVariance(x, spatialAxes, float64(epsilon))
 
 	// Apply scale and bias
 	// Scale and bias have shape [C], need to broadcast to [1, C, 1, 1, ...]
@@ -204,14 +190,8 @@ func convertGlobalMaxPool(inputs []*Node) *Node {
 		exceptions.Panicf("GlobalMaxPool requires at least 3D input, got rank %d", x.Rank())
 	}
 
-	// Reduce over all spatial dimensions (keep batch and channel)
-	spatialAxes := make([]int, x.Rank()-2)
-	for i := 2; i < x.Rank(); i++ {
-		spatialAxes[i-2] = i
-	}
-
 	// ReduceMax over spatial dimensions, keeping dims for compatibility
-	return ReduceAndKeep(x, ReduceMax, spatialAxes...)
+	return ReduceAndKeep(x, ReduceMax, getSpatialAxes(x)...)
 }
 
 // convertGlobalLpPool converts a ONNX GlobalLpPool node to a GoMLX node.
@@ -232,15 +212,9 @@ func convertGlobalLpPool(node *protos.NodeProto, inputs []*Node) *Node {
 	pNode := Scalar(g, dtype, float64(p))
 	invP := Scalar(g, dtype, 1.0/float64(p))
 
-	// Reduce over all spatial dimensions
-	spatialAxes := make([]int, x.Rank()-2)
-	for i := 2; i < x.Rank(); i++ {
-		spatialAxes[i-2] = i
-	}
-
 	// Lp pooling: (sum(|x|^p))^(1/p)
 	absPowP := Pow(Abs(x), pNode)
-	sumPow := ReduceAndKeep(absPowP, ReduceSum, spatialAxes...)
+	sumPow := ReduceAndKeep(absPowP, ReduceSum, getSpatialAxes(x)...)
 	return Pow(sumPow, invP)
 }
 
@@ -289,19 +263,8 @@ func convertMeanVarianceNormalization(node *protos.NodeProto, inputs []*Node) *N
 	x := inputs[0]
 	axes := getIntsAttrOr(node, "axes", []int{0, 2, 3})
 
-	g := x.Graph()
-	dtype := x.DType()
-	epsilon := Scalar(g, dtype, 1e-9)
-
-	// Calculate mean and variance over specified axes
-	mean := ReduceAndKeep(x, ReduceMean, axes...)
-
-	// Variance = E[(x - mean)^2]
-	centered := Sub(x, mean)
-	variance := ReduceAndKeep(Mul(centered, centered), ReduceMean, axes...)
-
 	// Normalize: (x - mean) / sqrt(variance + epsilon)
-	return Div(centered, Sqrt(Add(variance, epsilon)))
+	return normalizeWithMeanVariance(x, axes, 1e-9)
 }
 
 // convertCastLike converts a ONNX CastLike node to a GoMLX node.

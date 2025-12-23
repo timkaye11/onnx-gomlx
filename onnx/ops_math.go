@@ -210,17 +210,7 @@ func convertSum(inputs []*Node) *Node {
 	if len(inputs) == 0 {
 		exceptions.Panicf("Sum requires at least one input")
 	}
-	if len(inputs) == 1 {
-		return inputs[0]
-	}
-
-	// Broadcast all inputs to common shape and sum them
-	inputs = onnxBroadcastToCommonShape(inputs)
-	result := inputs[0]
-	for i := 1; i < len(inputs); i++ {
-		result = Add(result, inputs[i])
-	}
-	return result
+	return accumulateInputs(inputs, Add)
 }
 
 // convertMean converts a ONNX Mean node to a GoMLX node.
@@ -232,16 +222,7 @@ func convertMean(inputs []*Node) *Node {
 	if len(inputs) == 0 {
 		exceptions.Panicf("Mean requires at least one input")
 	}
-	if len(inputs) == 1 {
-		return inputs[0]
-	}
-
-	// Broadcast all inputs to common shape and compute mean
-	inputs = onnxBroadcastToCommonShape(inputs)
-	result := inputs[0]
-	for i := 1; i < len(inputs); i++ {
-		result = Add(result, inputs[i])
-	}
+	result := accumulateInputs(inputs, Add)
 	n := Scalar(result.Graph(), result.DType(), float64(len(inputs)))
 	return Div(result, n)
 }

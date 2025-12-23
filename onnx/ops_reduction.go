@@ -319,27 +319,7 @@ func convertArgMax(node *protos.NodeProto, inputs []*Node) *Node {
 	axis := getIntAttrOr(node, "axis", 0)
 	keepDims := getBoolAttrOr(node, "keepdims", true)
 	selectLastIndex := getBoolAttrOr(node, "select_last_index", false)
-
-	axis = AdjustAxisToOperandRank(operand, axis)
-
-	var result *Node
-	if selectLastIndex {
-		// To select last index, we negate and use ArgMin, then convert back
-		// Or we can reverse the axis, find argmax, then compute the correct index
-		reversed := Reverse(operand, axis)
-		result = ArgMax(reversed, axis)
-		// Convert index: actual_index = dim_size - 1 - reversed_index
-		dimSize := Scalar(operand.Graph(), operand.DType(), operand.Shape().Dim(axis))
-		result = Sub(Sub(dimSize, Scalar(operand.Graph(), result.DType(), 1)), result)
-	} else {
-		result = ArgMax(operand, axis)
-	}
-
-	if keepDims {
-		result = ExpandAxes(result, axis)
-	}
-
-	return result
+	return convertArgReduceOp(operand, axis, keepDims, selectLastIndex, ArgMax)
 }
 
 // convertArgMin converts a ONNX ArgMin node to a GoMLX node.
@@ -352,22 +332,5 @@ func convertArgMin(node *protos.NodeProto, inputs []*Node) *Node {
 	axis := getIntAttrOr(node, "axis", 0)
 	keepDims := getBoolAttrOr(node, "keepdims", true)
 	selectLastIndex := getBoolAttrOr(node, "select_last_index", false)
-
-	axis = AdjustAxisToOperandRank(operand, axis)
-
-	var result *Node
-	if selectLastIndex {
-		reversed := Reverse(operand, axis)
-		result = ArgMin(reversed, axis)
-		dimSize := Scalar(operand.Graph(), operand.DType(), operand.Shape().Dim(axis))
-		result = Sub(Sub(dimSize, Scalar(operand.Graph(), result.DType(), 1)), result)
-	} else {
-		result = ArgMin(operand, axis)
-	}
-
-	if keepDims {
-		result = ExpandAxes(result, axis)
-	}
-
-	return result
+	return convertArgReduceOp(operand, axis, keepDims, selectLastIndex, ArgMin)
 }
